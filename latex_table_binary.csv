@@ -1,0 +1,8 @@
+"Predictor","Effect_Size","CI_formatted","Interpretation"
+"College Education",-0.579,"[-0.624, -0.534]","Strong effect"
+"Individual Employment",0.329,"[0.281, 0.377]","Strong effect"
+"Female Gender",-0.02,"[-0.063, 0.023]","Small effect (non-significant)"
+"White Race",0.47,"[0.419, 0.521]","Strong effect"
+"Demographic Change (Binary)",0.003,"[-0.05, 0.055]","Very small effect (non-significant)"
+"Foreign-Born Status",-0.215,"[-0.3, -0.129]","Strong effect"
+"U.S. Citizenship",0.046,"[-0.032, 0.125]","Moderate effect (non-significant)"

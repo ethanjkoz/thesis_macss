@@ -1,0 +1,8 @@
+"Predictor","Effect_Size","CI_Lower","CI_Upper","P_Value","Significant"
+"College Education",-0.579,-0.624,-0.534,0,"Yes"
+"Individual Employment",0.329,0.281,0.377,0,"Yes"
+"Female Gender",-0.02,-0.063,0.023,0.354,"No"
+"White Race",0.47,0.419,0.521,0,"Yes"
+"Demographic Change (Binary)",0.003,-0.05,0.055,0.917,"No"
+"Foreign-Born Status",-0.215,-0.3,-0.129,0,"Yes"
+"U.S. Citizenship",0.046,-0.032,0.125,0.248,"No"

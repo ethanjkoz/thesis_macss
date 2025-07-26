@@ -31,7 +31,7 @@ boot = 1000
 n_sim = 1000
 random_seed = 0
 
-topmsa_gtcbsas = cev %>% drop_na(topmsa) %>% select(topmsa, gtcbsa) %>% 
+topmsa_gtcbsas = cev %>% drop_na(topmsa) %>% dplyr::select(topmsa, gtcbsa) %>% 
   zap_labels() %>% pull(gtcbsa) %>% unique()
 
 ### ACS ###
@@ -74,7 +74,7 @@ acs_clean = acs %>%
     moe_pct_renter = pct_moe_hous_tenure_occupied_hous_units_renter_occupied
 
   ) %>%
-  select(
+  dplyr::select(
     year, name, gtcbsa,
     median_age, moe_median_age,
     pct_white, moe_pct_white,
@@ -152,7 +152,7 @@ cev_new = cev %>%
   drop_na(topmsa, # drop rows not in top msa regions
           employed, high_social_capital, is_female, age, hispanic, race, 
           college, foreign_born, citizen) %>%
-  select(
+  dplyr::select(
     gtcbsa,
     
     employed, high_social_capital, social_capital,
@@ -171,7 +171,7 @@ rm(cev)
 ### JOINING CEV AND ACS###
 joined_df = cev_new %>% 
   left_join(acs_new, by = c("year", "gtcbsa")) %>%
-  select(-starts_with("lag"))
+  dplyr::select(-starts_with("lag"))
 ```
 
 ```{r}
@@ -217,51 +217,6 @@ analysis_df = joined_df %>%
   ) %>%
   drop_na(all_of(c(D, M, C, Y_bin, Y_cont)))
 ```
-
-```{r}
-balance_vars = c("age", "is_female", "foreign_born", "citizen", "employed",
-                 "mother_foreign_born", "father_foreign_born", "college",
-                 
-                 "median_age", "med_income", "unemploy_rate", "pct_white", 
-                 "pct_renter", "per_k_birth_12mo")
-
-balance_table = map_dfr(balance_vars, function(var) {
-  treated = joined_df %>% filter(.data[[D]] == 1)
-  control = joined_df %>% filter(.data[[D]] == 0)
-  
-  # convert to numeric
-  treated_var = as.numeric(as.character(treated[[var]]))
-  control_var = as.numeric(as.character(control[[var]]))
-  
-  # Calculate means and standard deviations
-  mean_treated = mean(treated_var, na.rm = TRUE)
-  mean_control = mean(control_var, na.rm = TRUE)
-  sd_treated = sd(treated_var, na.rm = TRUE)
-  sd_control = sd(control_var, na.rm = TRUE)
-  
-  # sig diff t test
-  test_result = t.test(treated_var, control_var)
-  
-  data.frame(
-    var = var,
-    mean_control = round(mean_control, 3),
-    sd_control = round(sd_control, 3),
-    mean_treated = round(mean_treated, 3),
-    sd_treated = round(sd_treated, 3),
-    deg_freedom = round(mean_treated - mean_control, 3),
-    pval = round(test_result$p.value, 3)
-  )
-})
-
-# Display balance table
-balance_flextable = flextable(balance_table) %>%
-  set_caption("Covariate Balance by Treatment Status") %>%
-  autofit() %>%
-  theme_vanilla()
-
-print(balance_flextable)
-```
-
 
 ```{r}
 # lin med (no interaction)
@@ -537,7 +492,7 @@ continuous_effects$NIE_CI = c(
 )
 
 # Display tables
-print(binary_effects %>% select(Method, NDE, NDE_CI, NDE_pval, NIE, NIE_CI, NIE_pval, TE))
+print(binary_effects %>% dplyr::select(Method, NDE, NDE_CI, NDE_pval, NIE, NIE_CI, NIE_pval, TE))
 print(cde_effects)
 print(continuous_effects)
 
@@ -565,7 +520,7 @@ print(summary_table)
 
 # chatgpt helped format this table
 pub_table1 = binary_effects %>%
-  select(Method, NDE, NDE_CI, NIE, NIE_CI, TE) %>%
+  dplyr::select(Method, NDE, NDE_CI, NIE, NIE_CI, TE) %>%
   flextable() %>%
   set_header_labels(
     Method = "Estimation Method",
@@ -593,141 +548,169 @@ write.csv(summary_table, "summary_table.csv", row.names = FALSE)
 
 
 
+
 ```{r}
 
-library(tidyverse)
-library(ggplot2)
-library(stargazer)
+# 1. RUN FULL REGRESSION MODELS WITH ALL CONTROLS
 
-# another balance table
+# For continuous social capital outcome
+continuous_model <- lm(social_capital ~ 
+                      sig_diff_pct_fb +  # Your main variable of interest
+                      employed +               # Employment mediator
+                      age +                    # Age
+                      is_female +              # Gender
+                      white +                  # Race
+                      hispanic +               # Ethnicity
+                      college +                # College education
+                      foreign_born +           # Foreign-born status
+                      citizen +                # Citizenship
+                      mother_foreign_born +    # Mother foreign-born
+                      father_foreign_born +    # Father foreign-born
+                      year +                   # Year fixed effects
+                      pct_white +             # Metro % white
+                      median_age +             # Metro median age
+                      med_income +             # Metro median income
+                      pct_renter +             # Metro % renters
+                      unemploy_rate +          # Metro unemployment rate
+                      per_k_birth_12mo,        # Metro birth rate
+                      data = analysis_df)
 
-create_balance_table = function(data, covariates) {
+# For binary social capital outcome  
+binary_model <- glm(high_social_capital ~ 
+                    sig_diff_pct_fb +
+                    employed +
+                    age +
+                    is_female +
+                    white +
+                    hispanic +
+                    college +
+                    foreign_born +
+                    citizen +
+                    mother_foreign_born +
+                    father_foreign_born +
+                    year +
+                    pct_white +
+                    median_age +
+                    med_income +
+                    pct_renter +
+                    unemploy_rate +
+                    per_k_birth_12mo,
+                    family = binomial(),
+                    data = analysis_df)
+
+# 2. EXTRACT COEFFICIENTS AND CONFIDENCE INTERVALS
+
+# For continuous outcome
+continuous_results <- tidy(continuous_model, conf.int = TRUE) %>%
+  dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("college", "employed", "I(age/10)", "female", "white", 
+                     "sig_diff_pct_fb", "foreign_born", "citizen"))
+
+print("CONTINUOUS SOCIAL CAPITAL RESULTS:")
+print(continuous_results)
+
+# For binary outcome  
+binary_results <- tidy(binary_model, conf.int = TRUE) %>%
+  dplyr::select(term, estimate, conf.low, conf.high, p.value) %>%
+  filter(term %in% c("college", "employed", "I(age/10)", "female", "white",
+                     "sig_diff_pct_fb", "foreign_born", "citizen"))
+
+print("BINARY SOCIAL CAPITAL RESULTS:")
+print(binary_results)
+
+
+create_effect_table <- function(model_results, outcome_name) {
   
-  balance_results = map_dfr(covariates, function(var) {
-    if(var %in% names(data)) {
-      treated = data[[var]][data$sig_diff_pct_fb == 1]
-      control = data[[var]][data$sig_diff_pct_fb == 0]
-      
-      # Basic stats
-      mean_treated = mean(treated, na.rm = TRUE)
-      mean_control = mean(control, na.rm = TRUE)
-      sd_treated = sd(treated, na.rm = TRUE)
-      sd_control = sd(control, na.rm = TRUE)
-      
-      # Standardized mean difference
-      pooled_sd = sqrt((var(treated, na.rm = TRUE) + var(control, na.rm = TRUE))/2)
-      
-      # standardized mean difference
-      smd = (mean_treated - mean_control) / pooled_sd
-      
-      # T-test
-      t_test = t.test(treated, control)
-      
-      tibble(
-        Variable = var,
-        Mean_Control = round(mean_control, 3),
-        SD_Control = round(sd_control, 3),
-        Mean_Treated = round(mean_treated, 3),
-        SD_Treated = round(sd_treated, 3),
-        Difference = round(mean_treated - mean_control, 3),
-        SMD = round(smd, 3),
-        P_Value = round(t_test$p.value, 3),
-        Imbalanced = ifelse(abs(smd) > 0.1, "Yes", "No")
+  # Helper function to extract coefficient info
+  get_coef_info <- function(term_name, label) {
+    row <- model_results[model_results$term == term_name, ]
+    if(nrow(row) > 0) {
+      data.frame(
+        Predictor = label,
+        Effect_Size = round(row$estimate, 3),
+        CI_Lower = round(row$conf.low, 3),
+        CI_Upper = round(row$conf.high, 3),
+        P_Value = round(row$p.value, 3),
+        Significant = ifelse(row$p.value < 0.05, "Yes", "No")
       )
     }
-  })
-  
-  return(balance_results)
-}
-
-# visualize
-create_balance_plot = function(balance_table) {
-  
-  # Simple dot plot of standardized mean differences
-  p1 = ggplot(balance_table, aes(x = abs(SMD), y = reorder(Variable, abs(SMD)))) +
-    geom_point(aes(color = Imbalanced), size = 3) +
-    geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
-    labs(title = "Covariate Balance Assessment",
-         subtitle = "Absolute Standardized Mean Differences",
-         x = "|Standardized Mean Difference|",
-         y = "Variable",
-         color = "Imbalanced\n(|SMD| > 0.1)",
-         caption = "Red line indicates threshold for meaningful imbalance") +
-    theme_minimal() +
-    theme(axis.text.y = element_text(size = 10))
-  
-  return(p1)
-}
-
-# summary
-
-summarize_balance = function(balance_table) {
-  
-  summary_stats = balance_table %>%
-    summarise(
-      Total_Variables = n(),
-      Imbalanced_Variables = sum(Imbalanced == "Yes"),
-      Percent_Imbalanced = round(100 * Imbalanced_Variables / Total_Variables, 1),
-      Max_SMD = max(abs(SMD)),
-      Mean_SMD = round(mean(abs(SMD)), 3),
-      Significant_Differences = sum(P_Value < 0.05)
-    )
-  
-  cat("=== BALANCE ASSESSMENT SUMMARY ===\n")
-  cat(paste("Variables examined:", summary_stats$Total_Variables, "\n"))
-  cat(paste("Variables with |SMD| > 0.1:", summary_stats$Imbalanced_Variables, 
-            "(", summary_stats$Percent_Imbalanced, "%)\n"))
-  cat(paste("Maximum |SMD|:", round(summary_stats$Max_SMD, 3), "\n"))
-  cat(paste("Average |SMD|:", summary_stats$Mean_SMD, "\n"))
-  cat(paste("Statistically significant differences:", summary_stats$Significant_Differences, "\n"))
-  
-  if(summary_stats$Percent_Imbalanced > 50) {
-    cat("\n*** WARNING: Severe imbalance detected ***\n")
-    cat("Results should be interpreted as associations, not causal effects.\n")
   }
   
-  return(summary_stats)
+  # Extract each coefficient
+  table_data <- rbind(
+    get_coef_info("college", "College Education"),
+    get_coef_info("employed", "Individual Employment"),
+    get_coef_info("female", "Female Gender"),
+    get_coef_info("white", "White Race"),
+    get_coef_info("sig_diff_pct_fb", paste0("Demographic Change (", outcome_name, ")")),
+    get_coef_info("foreign_born", "Foreign-Born Status"),
+    get_coef_info("citizen", "U.S. Citizenship")
+  )
+  
+  return(table_data)
 }
 
+# Create tables for both outcomes
+continuous_table <- create_effect_table(continuous_results, "Continuous")
+binary_table <- create_effect_table(binary_results, "Binary")
 
-run_other_analysis = function(data, covariates) {
-  
-  cat("Running minimal analysis for thesis completion...\n\n")
-  
-  # balance table
-  cat("1. Creating balance table...\n")
-  balance_table = create_balance_table(data, covariates)
-  
-  # summary
-  cat("2. Summarizing balance...\n")
-  balance_summary = summarize_balance(balance_table)
-  
-  # plot
-  cat("3. Creating balance plot...\n")
-  balance_plot = create_balance_plot(balance_table)
-  
-  
-  cat("5. Generating LaTeX table...\n")
-  stargazer(balance_table, 
-           type = "latex",
-           title = "Covariate Balance by Treatment Status",
-           summary = FALSE,
-           digits = 3,
-           out = "balance_table.tex")
-  
-  cat("Analysis complete!\n\n")
-  
-  # Return everything
-  return(list(
-    balance_table = balance_table,
-    balance_summary = balance_summary,
-    balance_plot = balance_plot
-  ))
+print("EFFECT SIZE TABLE FOR CONTINUOUS OUTCOME:")
+print(continuous_table)
+
+print("EFFECT SIZE TABLE FOR BINARY OUTCOME:")
+print(binary_table)
+
+# 4. FORMAT FOR LATEX TABLE
+
+format_for_latex <- function(table_data) {
+  table_data %>%
+    mutate(
+      CI_formatted = paste0("[", CI_Lower, ", ", CI_Upper, "]"),
+      Interpretation = case_when(
+        abs(Effect_Size) >= 0.08 ~ "Strong effect",
+        abs(Effect_Size) >= 0.03 ~ "Moderate effect", 
+        abs(Effect_Size) >= 0.01 ~ "Small effect",
+        TRUE ~ "Very small effect"
+      ),
+      Interpretation = paste0(Interpretation, ifelse(Significant == "Yes", "", " (non-significant)"))
+    ) %>%
+    dplyr::select(Predictor, Effect_Size, CI_formatted, Interpretation)
 }
 
-# Run the analysis
-results = run_other_analysis(analysis_df, C)
-ggsave("balance_plot.png", results$balance_plot, width = 10, height = 6)
-View(results$balance_table)
-print(results$balance_summary)
+latex_continuous <- format_for_latex(continuous_table)
+latex_binary <- format_for_latex(binary_table)
+
+print("FORMATTED FOR LATEX (CONTINUOUS):")
+print(latex_continuous)
+
+print("FORMATTED FOR LATEX (BINARY):")
+print(latex_binary)
+
+# 5. SAVE RESULTS
+write.csv(continuous_table, "effect_sizes_continuous.csv", row.names = FALSE)
+write.csv(binary_table, "effect_sizes_binary.csv", row.names = FALSE)
+write.csv(latex_continuous, "latex_table_continuous.csv", row.names = FALSE)
+write.csv(latex_binary, "latex_table_binary.csv", row.names = FALSE)
+
+# 6. GET THE SPECIFIC NUMBERS YOU NEED FOR YOUR THESIS
+
+print("=== NUMBERS FOR YOUR THESIS ===")
+
+# Demographics change effects (your main findings)
+demo_continuous <- continuous_results[continuous_results$term == "high_diversity_change", ]
+demo_binary <- binary_results[binary_results$term == "high_diversity_change", ]
+
+cat("Demographic Change (Continuous):", round(demo_continuous$estimate, 3), 
+    "CI: [", round(demo_continuous$conf.low, 3), ",", round(demo_continuous$conf.high, 3), "]\n")
+cat("Demographic Change (Binary):", round(demo_binary$estimate, 3),
+    "CI: [", round(demo_binary$conf.low, 3), ",", round(demo_binary$conf.high, 3), "]\n")
+
+# For context - biggest effects
+college_continuous <- continuous_results[continuous_results$term == "college", ]
+employed_continuous <- continuous_results[continuous_results$term == "employed", ]
+
+cat("College Education:", round(college_continuous$estimate, 3), "\n")
+cat("Employment Status:", round(employed_continuous$estimate, 3), "\n")
+
+print("Use these REAL numbers in your thesis tables and text!")
 ```
