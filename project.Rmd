@@ -1,0 +1,733 @@
+---
+title: "thesis"
+author: "Ethan Kozlowski"
+date: "2025-07-03"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(arrow)
+library(haven)
+library(flextable)
+library(apc)
+library(cobalt)
+library(gridExtra)
+
+# from github
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/utils.R")
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/linmed.R")
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/medsim.R")
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/ipwmed.R")
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/ipwcde.R")
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/impcde.R")
+source("https://raw.githubusercontent.com/causalMedAnalysis/causalMedR/refs/heads/main/rwrlite.R")
+
+acs = read_feather("D:\\Thesis\\data\\acs_data\\acs.feather")
+cev = read_feather("D:\\Thesis\\data\\cps_cev_data\\cps_data.feather")
+
+years = c(2017, 2019, 2021, 2023)
+boot = 1000
+n_sim = 1000
+random_seed = 0
+
+topmsa_gtcbsas = cev %>% drop_na(topmsa) %>% select(topmsa, gtcbsa) %>% 
+  zap_labels() %>% pull(gtcbsa) %>% unique()
+
+### ACS ###
+
+acs_clean = acs %>%
+  # if I want to make claims about the MSAs, I need to use top 12 only
+  filter(gtcbsa %in% topmsa_gtcbsas) %>%
+  mutate(
+    # coalescing required because of name changes in 2015–17 vs 19–23
+    median_age = coalesce(sex_and_age_median_age_yrs,
+                          sex_and_age_tot_pop_median_age_yrs),
+    moe_median_age = coalesce(moe_sex_and_age_median_age_yrs,
+                              moe_sex_and_age_tot_pop_median_age_yrs),
+    pct_white = coalesce(pct_race_1_race_white,
+                         pct_race_tot_pop_1_race_white),
+    moe_pct_white = coalesce(pct_moe_race_1_race_white,
+                             pct_moe_race_tot_pop_1_race_white),
+    pct_col_ed = coalesce(pct_edu_attain_pct_bachelors_degree_up,
+                          pct_edu_attain_pop_25_yrs_up_bachelors_degree_up),
+    moe_pct_col_ed = coalesce(pct_moe_edu_attain_pct_bachelors_degree_up,
+                              pct_moe_edu_attain_pop_25_yrs_up_bachelors_degree_up)
+  ) %>%
+  rename(
+    med_income = income_and_benefits_infl_adj_usd_fams_median_fam_income_usd,
+    moe_med_income = moe_income_and_benefits_infl_adj_usd_fams_median_fam_income_usd,
+    
+    unemploy_rate = pct_employment_status_civ_labor_force_unemployment_rate,
+    moe_unemploy_rate = pct_moe_employment_status_civ_labor_force_unemployment_rate,
+    
+    # pct_hisp = pct_hisp_lat_and_race_tot_pop_hisp_lat,
+    # moe_pct_hisp = pct_moe_hisp_lat_and_race_tot_pop_hisp_lat, # has many missing
+    
+    per_k_birth_12mo = fertility_num_women_15_to_50_yo_had_birth_in_past_12_months_per_1k_women_15_to_50_yo,
+    moe_per_k_birth_12mo = moe_fertility_num_women_15_to_50_yo_had_birth_in_past_12_months_per_1k_women_15_to_50_yo,
+    
+    pct_fb = pct_place_birth_tot_pop_foreign_born,
+    moe_pct_fb = pct_moe_place_birth_tot_pop_foreign_born,
+    
+    pct_renter = pct_hous_tenure_occupied_hous_units_renter_occupied,
+    moe_pct_renter = pct_moe_hous_tenure_occupied_hous_units_renter_occupied
+
+  ) %>%
+  select(
+    year, name, gtcbsa,
+    median_age, moe_median_age,
+    pct_white, moe_pct_white,
+    # pct_hisp, moe_pct_hisp,
+    per_k_birth_12mo, moe_per_k_birth_12mo,
+    pct_col_ed, moe_pct_col_ed,
+    unemploy_rate, moe_unemploy_rate,
+    med_income, moe_med_income,
+    pct_fb, moe_pct_fb, 
+    pct_renter, moe_pct_renter
+  )
+
+vars = c(
+  "median_age",
+  "pct_white",
+  # "pct_hisp",
+  "per_k_birth_12mo",
+  "pct_col_ed",
+  "unemploy_rate",
+  "med_income",
+  "pct_fb",
+  "pct_renter"
+)
+
+acs_new = acs_clean %>%
+  arrange(gtcbsa, year) %>%
+  group_by(gtcbsa) %>%
+
+  # lag vars
+  mutate(across(all_of(c(vars, paste0("moe_", vars))), lag, .names = "lag_{.col}")) %>%
+
+  # find diffs
+  mutate(across(all_of(vars), ~.x - get(paste0("lag_", cur_column())), .names = "diff_{.col}")) %>%
+
+  # find SE for diffs
+  mutate(across(all_of(vars), ~{
+    moe_now = get(paste0("moe_", cur_column()))
+    moe_lag = get(paste0("lag_moe_", cur_column()))
+    sqrt(moe_now^2 + moe_lag^2) / 1.645
+  }, .names = "se_diff_{.col}")) %>%
+
+  # determine significance
+  mutate(across(all_of(vars), ~as.factor(ifelse(
+    abs(get(paste0("diff_", cur_column()))) > 1.96 * get(paste0("se_diff_", cur_column())), 
+    1, 0)), .names = "sig_diff_{.col}")) %>%
+
+  ungroup() %>%
+  filter(year %in% years)
+
+rm(acs_clean, acs)
+
+### CEV ###
+
+cev_new = cev %>% 
+  mutate(
+    employed = as.numeric(employed),
+    social_capital = as.numeric(rowSums(
+      across(c(yesfftalk, yesffissues, yesntalk, yesnissues, yesfavors, action), 
+             ~ifelse(. == 1, 1, 0)),
+      na.rm = FALSE)),
+    high_social_capital = as.factor(ifelse(social_capital >= 3, 1, 0)),
+    age = prtage,
+    is_female = as.factor(female),
+    race = white,
+    college = as.factor(
+      ifelse(simedu >= 4, 1, 0)),
+    
+    foreign_born = as.factor(foreign_born),
+    # does not distinguish between native and naturalized citizens
+    citizen = as.factor(
+      ifelse(citizenship_status %in% c("Native", "Naturalized Citizen"), 1, 0)),
+    
+    year = hryear4) %>%
+  # Remove missing values on key variables
+  drop_na(topmsa, # drop rows not in top msa regions
+          employed, high_social_capital, is_female, age, hispanic, race, 
+          college, foreign_born, citizen) %>%
+  select(
+    gtcbsa,
+    
+    employed, high_social_capital, social_capital,
+    is_female, race, hispanic, college, 
+    foreign_born, citizen, mother_foreign_born, father_foreign_born,
+    
+    yesfftalk, yesffissues, yesntalk, yesnissues, yesfavors, action,
+    fftalk, ffissues, ntalk, nissues, favors,
+    
+    age, year, generation, # age, period, and cohort
+    
+    supwgt # weighting
+  )
+rm(cev)
+
+### JOINING CEV AND ACS###
+joined_df = cev_new %>% 
+  left_join(acs_new, by = c("year", "gtcbsa")) %>%
+  select(-starts_with("lag"))
+```
+
+```{r}
+# treatment
+D = "sig_diff_pct_fb"
+# mediator
+M = "employed"
+
+# covars
+C = c(
+  # age, period, cohort effects
+  "year",
+  # "generation"
+  "age",
+  
+  # individual lvl covars
+  "is_female",
+  "foreign_born",
+  "race",
+  "hispanic",
+  "college",
+  "citizen",
+  "mother_foreign_born",
+  "father_foreign_born",
+  
+  # county lvl covars
+  "pct_white",
+  "median_age",
+  "med_income",
+  "pct_renter",
+  "unemploy_rate",
+  "per_k_birth_12mo"
+)
+
+# outcome
+Y_bin= "high_social_capital"
+Y_cont = "social_capital"
+
+analysis_df = joined_df %>%
+  mutate(
+    across(all_of(c(D, M, C, Y_bin, Y_cont)),
+           ~as.numeric(as.character(.)))
+  ) %>%
+  drop_na(all_of(c(D, M, C, Y_bin, Y_cont)))
+```
+
+```{r}
+balance_vars = c("age", "is_female", "foreign_born", "citizen", "employed",
+                 "mother_foreign_born", "father_foreign_born", "college",
+                 
+                 "median_age", "med_income", "unemploy_rate", "pct_white", 
+                 "pct_renter", "per_k_birth_12mo")
+
+balance_table = map_dfr(balance_vars, function(var) {
+  treated = joined_df %>% filter(.data[[D]] == 1)
+  control = joined_df %>% filter(.data[[D]] == 0)
+  
+  # convert to numeric
+  treated_var = as.numeric(as.character(treated[[var]]))
+  control_var = as.numeric(as.character(control[[var]]))
+  
+  # Calculate means and standard deviations
+  mean_treated = mean(treated_var, na.rm = TRUE)
+  mean_control = mean(control_var, na.rm = TRUE)
+  sd_treated = sd(treated_var, na.rm = TRUE)
+  sd_control = sd(control_var, na.rm = TRUE)
+  
+  # sig diff t test
+  test_result = t.test(treated_var, control_var)
+  
+  data.frame(
+    var = var,
+    mean_control = round(mean_control, 3),
+    sd_control = round(sd_control, 3),
+    mean_treated = round(mean_treated, 3),
+    sd_treated = round(sd_treated, 3),
+    deg_freedom = round(mean_treated - mean_control, 3),
+    pval = round(test_result$p.value, 3)
+  )
+})
+
+# Display balance table
+balance_flextable = flextable(balance_table) %>%
+  set_caption("Covariate Balance by Treatment Status") %>%
+  autofit() %>%
+  theme_vanilla()
+
+print(balance_flextable)
+```
+
+
+```{r}
+# lin med (no interaction)
+
+linmed_binary = linmed(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_bin,
+  C = C,
+  d = 1,
+  dstar = 0,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed,
+  boot_parallel = TRUE
+)
+
+# with DM interaction
+linmed_binary_int = linmed(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_bin,
+  C = C,
+  d = 1,
+  dstar = 0,
+  interaction_DM = TRUE,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed
+)
+
+# Continuous outcome
+linmed_continuous = linmed(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_cont,
+  C = C,
+  d = 1,
+  dstar = 0,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed
+)
+
+linmed_cde = linmed(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_bin,
+  C = C,
+  d = 1,
+  dstar = 0,
+  m = 1,  # CDE among employed
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed
+)
+```
+
+```{r}
+# sim approach
+
+# Define model formulas
+M_formula = as.formula(paste(M, "~", D, "+", paste(C, collapse = " + ")))
+Y_bin_formula = as.formula(paste(Y_bin, "~", M, "*", D, "+", paste(C, collapse = " + ")))
+Y_cont_formula = as.formula(paste(Y_cont, "~", M, "*", D, "+", paste(C, collapse = " + ")))
+
+# Binary outcome specifications
+specs_binary = list(
+  list(func = "glm", formula = M_formula, args = list(family = "binomial")),
+  list(func = "glm", formula = Y_bin_formula, args = list(family = "binomial"))
+)
+
+medsim_binary = medsim(
+  data = analysis_df,
+  num_sim = n_sim,
+  cat_list = c(0, 1),
+  treatment = D,
+  intv_med = NULL,
+  model_spec = specs_binary,
+  boot = TRUE,
+  boot_reps = boot,
+  seed = random_seed
+)
+
+medsim_cde = medsim(
+  data = analysis_df,
+  num_sim = n_sim,
+  cat_list = c(0, 1),
+  treatment = D,
+  intv_med = paste0(M, "=1"),
+  model_spec = specs_binary,
+  boot = TRUE,
+  boot_reps = boot,
+  seed = random_seed
+)
+```
+
+```{r}
+# IPW
+
+formula1_str = paste(D, "~", paste(C, collapse = " + "))
+formula2_str = paste(D, "~", paste(c(C, M), collapse = " + "))
+
+ipw_binary = ipwmed(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_bin,
+  formula1_string = formula1_str,
+  formula2_string = formula2_str,
+  stabilize = TRUE,
+  censor = TRUE,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed,
+  boot_parallel = TRUE
+)
+
+ipw_continuous = ipwmed(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_cont,
+  formula1_string = formula1_str,
+  formula2_string = formula2_str,
+  stabilize = TRUE,
+  censor = TRUE,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed
+)
+
+formula_D_str = paste(D, "~", paste(C, collapse = " + "))
+formula_M_str = paste(M, "~", D, "+", paste(C, collapse = " + "))
+
+ipwcde_result = ipwcde(
+  data = analysis_df,
+  D = D,
+  M = M,
+  Y = Y_bin,
+  m = 1,  # CDE at employed = 1
+  formula_D_string = formula_D_str,
+  formula_M_string = formula_M_str,
+  stabilize = TRUE,
+  censor = TRUE,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed
+)
+
+outcome_model = glm(as.formula(paste(Y_bin, "~", D, "*", M, "+", 
+                                     paste(C, collapse = " + "))),
+                   data = analysis_df, family = binomial)
+
+impcde_result = impcde(
+  data = analysis_df,
+  model_y = outcome_model,
+  D = D,
+  M = M,
+  d = 1,
+  dstar = 0,
+  m = 1,
+  boot = TRUE,
+  boot_reps = boot,
+  boot_seed = random_seed
+)
+```
+
+```{r}
+# Table 1: Natural Effects for Binary Outcome (High Social Capital)
+binary_effects = data.frame(
+  Method = c("Linear Model", 
+             "Linear Model (with DM interaction)",
+             "Simulation-based (GLM)",
+             "IPW"),
+  NDE = c(linmed_binary$NDE,
+          linmed_binary_int$NDE,
+          medsim_binary$results$point.est[2],
+          ipw_binary$NDE),
+  NIE = c(linmed_binary$NIE,
+          linmed_binary_int$NIE,
+          medsim_binary$results$point.est[3],
+          ipw_binary$NIE),
+  TE = c(linmed_binary$ATE,
+         linmed_binary_int$ATE,
+         medsim_binary$results$point.est[1],
+         ipw_binary$ATE)) %>%
+  mutate(across(c(NDE, NIE, TE), ~round(., 4)))
+
+# Add confidence intervals
+binary_effects$NDE_CI = c(
+  paste0("[", round(linmed_binary$ci_NDE[1], 4), ", ", round(linmed_binary$ci_NDE[2], 4), "]"),
+  paste0("[", round(linmed_binary_int$ci_NDE[1], 4), ", ", round(linmed_binary_int$ci_NDE[2], 4), "]"),
+  paste0("[", round(medsim_binary$results$ll.95ci[2], 4), ", ", 
+         round(medsim_binary$results$ul.95ci[2], 4), "]"),
+  paste0("[", round(ipw_binary$ci_NDE[1], 4), ", ", round(ipw_binary$ci_NDE[2], 4), "]")
+)
+
+binary_effects$NIE_CI = c(
+  paste0("[", round(linmed_binary$ci_NIE[1], 4), ", ", round(linmed_binary$ci_NIE[2], 4), "]"),
+  paste0("[", round(linmed_binary_int$ci_NIE[1], 4), ", ", round(linmed_binary_int$ci_NIE[2], 4), "]"),
+  paste0("[", round(medsim_binary$results$ll.95ci[3], 4), ", ", 
+         round(medsim_binary$results$ul.95ci[3], 4), "]"),
+  paste0("[", round(ipw_binary$ci_NIE[1], 4), ", ", round(ipw_binary$ci_NIE[2], 4), "]")
+)
+
+# Add pvals
+binary_effects$NDE_pval = c(
+  linmed_binary$pvalue_NDE,
+  linmed_binary_int$pvalue_NDE,
+  medsim_binary$results$p.value[2],
+  ipw_binary$pvalue_NDE
+) %>% round(4)
+
+binary_effects$NIE_pval = c(
+  linmed_binary$pvalue_NIE,
+  linmed_binary_int$pvalue_NIE,
+  medsim_binary$results$p.value[3],
+  ipw_binary$pvalue_NIE
+) %>% round(4)
+```
+
+
+```{r}
+# Table 2: Controlled Direct Effects
+cde_effects = data.frame(
+  Method = c("Linear Model", "Simulation-based", "IPW", "Regression Imputation"),
+  CDE = c(linmed_cde$CDE,
+          medsim_cde$results$point.est,
+          ipwcde_result$CDE,
+          impcde_result$CDE),
+  CI = c(
+    paste0("[", round(linmed_cde$ci_CDE[1], 4), ", ", round(linmed_cde$ci_CDE[2], 4), "]"),
+    paste0("[", round(medsim_cde$results$ll.95ci, 4), ", ",
+           round(medsim_cde$results$ul.95ci, 4), "]"),
+    paste0("[", round(ipwcde_result$ci_CDE[1], 4), ", ", round(ipwcde_result$ci_CDE[2], 4), "]"),
+    paste0("[", round(impcde_result$ci_CDE[1], 4), ", ", round(impcde_result$ci_CDE[2], 4), "]")
+  ),
+  p_value = c(
+    linmed_cde$pvalue_CDE,
+    medsim_cde$results$p.value,
+    ipwcde_result$pvalue_CDE,
+    impcde_result$pvalue_CDE
+  )
+) %>%
+  mutate(CDE = round(CDE, 4),
+         p_value = round(p_value, 4))
+```
+
+
+```{r}
+# Table 3: Continuous Outcome Results
+continuous_effects = data.frame(
+  Method = c("Linear Model", "IPW"),
+  NDE = c(linmed_continuous$NDE, ipw_continuous$NDE),
+  NIE = c(linmed_continuous$NIE, ipw_continuous$NIE),
+  TE = c(linmed_continuous$ATE, ipw_continuous$ATE)
+) %>%
+  mutate(across(c(NDE, NIE, TE), ~round(., 4)))
+
+continuous_effects$NDE_CI = c(
+  paste0("[", round(linmed_continuous$ci_NDE[1], 4), ", ", round(linmed_continuous$ci_NDE[2], 4), "]"),
+  paste0("[", round(ipw_continuous$ci_NDE[1], 4), ", ", round(ipw_continuous$ci_NDE[2], 4), "]")
+)
+
+continuous_effects$NIE_CI = c(
+  paste0("[", round(linmed_continuous$ci_NIE[1], 4), ", ", round(linmed_continuous$ci_NIE[2], 4), "]"),
+  paste0("[", round(ipw_continuous$ci_NIE[1], 4), ", ", round(ipw_continuous$ci_NIE[2], 4), "]")
+)
+
+# Display tables
+print(binary_effects %>% select(Method, NDE, NDE_CI, NDE_pval, NIE, NIE_CI, NIE_pval, TE))
+print(cde_effects)
+print(continuous_effects)
+
+# Create a summary interpretation table
+summary_table = data.frame(
+  Effect = c("Natural Direct Effect (NDE)", 
+             "Natural Indirect Effect (NIE)",
+             "Total Effect (TE)",
+             "Controlled Direct Effect (CDE)"),
+  Interpretation = c(
+    "Effect of migration change on social capital NOT through employment",
+    "Effect of migration change on social capital THROUGH employment", 
+    "Total effect of migration change on social capital",
+    "Effect of migration change on social capital when employment is fixed at 1"
+  ),
+  Binary_Est = c(
+    round(mean(c(linmed_binary$NDE, linmed_binary_int$NDE, ipw_binary$NDE)), 4),
+    round(mean(c(linmed_binary$NIE, linmed_binary_int$NIE, ipw_binary$NIE)), 4),
+    round(mean(c(linmed_binary$ATE, linmed_binary_int$ATE, ipw_binary$ATE)), 4),
+    round(mean(c(linmed_cde$CDE, ipwcde_result$CDE, impcde_result$CDE)), 4)
+  )
+)
+
+print(summary_table)
+
+# chatgpt helped format this table
+pub_table1 = binary_effects %>%
+  select(Method, NDE, NDE_CI, NIE, NIE_CI, TE) %>%
+  flextable() %>%
+  set_header_labels(
+    Method = "Estimation Method",
+    NDE = "NDE",
+    NDE_CI = "95% CI",
+    NIE = "NIE", 
+    NIE_CI = "95% CI",
+    TE = "Total Effect"
+  ) %>%
+  add_header_row(values = c("", "Natural Direct Effect", "Natural Indirect Effect", ""),
+                 colwidths = c(1, 2, 2, 1)) %>%
+  theme_vanilla() %>%
+  autofit()
+
+print(pub_table1)
+
+```
+
+```{r}
+write.csv(binary_effects, "binary_effects.csv", row.names = FALSE)
+write.csv(cde_effects, "cde_effects.csv", row.names = FALSE)
+write.csv(continuous_effects, "continuous_effects.csv", row.names = FALSE)
+write.csv(summary_table, "summary_table.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+
+library(tidyverse)
+library(ggplot2)
+library(stargazer)
+
+# another balance table
+
+create_balance_table = function(data, covariates) {
+  
+  balance_results = map_dfr(covariates, function(var) {
+    if(var %in% names(data)) {
+      treated = data[[var]][data$sig_diff_pct_fb == 1]
+      control = data[[var]][data$sig_diff_pct_fb == 0]
+      
+      # Basic stats
+      mean_treated = mean(treated, na.rm = TRUE)
+      mean_control = mean(control, na.rm = TRUE)
+      sd_treated = sd(treated, na.rm = TRUE)
+      sd_control = sd(control, na.rm = TRUE)
+      
+      # Standardized mean difference
+      pooled_sd = sqrt((var(treated, na.rm = TRUE) + var(control, na.rm = TRUE))/2)
+      
+      # standardized mean difference
+      smd = (mean_treated - mean_control) / pooled_sd
+      
+      # T-test
+      t_test = t.test(treated, control)
+      
+      tibble(
+        Variable = var,
+        Mean_Control = round(mean_control, 3),
+        SD_Control = round(sd_control, 3),
+        Mean_Treated = round(mean_treated, 3),
+        SD_Treated = round(sd_treated, 3),
+        Difference = round(mean_treated - mean_control, 3),
+        SMD = round(smd, 3),
+        P_Value = round(t_test$p.value, 3),
+        Imbalanced = ifelse(abs(smd) > 0.1, "Yes", "No")
+      )
+    }
+  })
+  
+  return(balance_results)
+}
+
+# visualize
+create_balance_plot = function(balance_table) {
+  
+  # Simple dot plot of standardized mean differences
+  p1 = ggplot(balance_table, aes(x = abs(SMD), y = reorder(Variable, abs(SMD)))) +
+    geom_point(aes(color = Imbalanced), size = 3) +
+    geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+    labs(title = "Covariate Balance Assessment",
+         subtitle = "Absolute Standardized Mean Differences",
+         x = "|Standardized Mean Difference|",
+         y = "Variable",
+         color = "Imbalanced\n(|SMD| > 0.1)",
+         caption = "Red line indicates threshold for meaningful imbalance") +
+    theme_minimal() +
+    theme(axis.text.y = element_text(size = 10))
+  
+  return(p1)
+}
+
+# summary
+
+summarize_balance = function(balance_table) {
+  
+  summary_stats = balance_table %>%
+    summarise(
+      Total_Variables = n(),
+      Imbalanced_Variables = sum(Imbalanced == "Yes"),
+      Percent_Imbalanced = round(100 * Imbalanced_Variables / Total_Variables, 1),
+      Max_SMD = max(abs(SMD)),
+      Mean_SMD = round(mean(abs(SMD)), 3),
+      Significant_Differences = sum(P_Value < 0.05)
+    )
+  
+  cat("=== BALANCE ASSESSMENT SUMMARY ===\n")
+  cat(paste("Variables examined:", summary_stats$Total_Variables, "\n"))
+  cat(paste("Variables with |SMD| > 0.1:", summary_stats$Imbalanced_Variables, 
+            "(", summary_stats$Percent_Imbalanced, "%)\n"))
+  cat(paste("Maximum |SMD|:", round(summary_stats$Max_SMD, 3), "\n"))
+  cat(paste("Average |SMD|:", summary_stats$Mean_SMD, "\n"))
+  cat(paste("Statistically significant differences:", summary_stats$Significant_Differences, "\n"))
+  
+  if(summary_stats$Percent_Imbalanced > 50) {
+    cat("\n*** WARNING: Severe imbalance detected ***\n")
+    cat("Results should be interpreted as associations, not causal effects.\n")
+  }
+  
+  return(summary_stats)
+}
+
+
+run_other_analysis = function(data, covariates) {
+  
+  cat("Running minimal analysis for thesis completion...\n\n")
+  
+  # balance table
+  cat("1. Creating balance table...\n")
+  balance_table = create_balance_table(data, covariates)
+  
+  # summary
+  cat("2. Summarizing balance...\n")
+  balance_summary = summarize_balance(balance_table)
+  
+  # plot
+  cat("3. Creating balance plot...\n")
+  balance_plot = create_balance_plot(balance_table)
+  
+  
+  cat("5. Generating LaTeX table...\n")
+  stargazer(balance_table, 
+           type = "latex",
+           title = "Covariate Balance by Treatment Status",
+           summary = FALSE,
+           digits = 3,
+           out = "balance_table.tex")
+  
+  cat("Analysis complete!\n\n")
+  
+  # Return everything
+  return(list(
+    balance_table = balance_table,
+    balance_summary = balance_summary,
+    balance_plot = balance_plot
+  ))
+}
+
+# Run the analysis
+results = run_other_analysis(analysis_df, C)
+ggsave("balance_plot.png", results$balance_plot, width = 10, height = 6)
+View(results$balance_table)
+print(results$balance_summary)
+```

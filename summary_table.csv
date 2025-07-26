@@ -1,0 +1,5 @@
+"Effect","Interpretation","Binary_Est"
+"Natural Direct Effect (NDE)","Effect of migration change on social capital NOT through employment",-0.0013
+"Natural Indirect Effect (NIE)","Effect of migration change on social capital THROUGH employment",0
+"Total Effect (TE)","Total effect of migration change on social capital",-0.0013
+"Controlled Direct Effect (CDE)","Effect of migration change on social capital when employment is fixed at 1",-0.0051
